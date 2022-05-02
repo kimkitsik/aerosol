@@ -18,3 +18,4 @@ usb-device = "0.2.8"
 usbd-serial = "0.1.0"
 alloc-cortex-m = "0.4.1"
 arrayvec = { version = "0.7.2", default-features = false }
+max31855 = "0.1.0"
