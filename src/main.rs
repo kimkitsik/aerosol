@@ -90,15 +90,17 @@ fn main() -> ! {
         }
         // 200 baidine buffer
         let mut buf = ArrayString::<200>::new();
-        //let x=data[0];
 
-        for x in data {
-            write!(&mut buf, "x= {}\r\n",x).ok();
+        serial.write(buf.as_bytes());
+        //serial.write(&data[0..4]);
+
+        //for x in data {
+          //  write!(&mut buf, "x= {}\r\n",x).ok();
             // Formaatimist vt siit https://doc.rust-lang.org/std/fmt/
-            serial.write(buf.as_bytes());
-        }
 
+        //}
 
+        delay.delay_ms(500_u32);
 
 
     }
