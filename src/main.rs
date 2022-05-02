@@ -93,6 +93,7 @@ fn main() -> ! {
         let mut buf = ArrayString::<200>::new();
         let x=data[0];
 
+
         write!(&mut buf, "x= {}\r\n",x).ok();
         // Formaatimist vt siit https://doc.rust-lang.org/std/fmt/
 
