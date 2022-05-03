@@ -8,6 +8,7 @@ use panic_halt as _;
 use core::fmt::Write;
 use core::cell::{Cell, RefCell};
 use core::ops::{DerefMut, Not};
+use core::ptr::addr_of_mut;
 use arrayvec::ArrayString;
 use cortex_m;
 use cortex_m::interrupt::{free, CriticalSection, Mutex};
@@ -44,10 +45,6 @@ static mut USB_BUS: Option<UsbBusAllocator<UsbBus<USB>>> = None;
 fn main() -> ! {
     let dp = pac::Peripherals::take().unwrap();
     let rcc = dp.RCC.constrain();
-
-    // interrupti näite GPIO
-    let gpiob = dp.GPIOB.split();
-    let mut led = gpiob.pb8.into_push_pull_output();
 
     // Set up the system clock
     let clocks = rcc
@@ -130,23 +127,27 @@ fn main() -> ! {
         pac::NVIC::unmask(hal::pac::Interrupt::OTG_FS);
     }
 
-    let mut data = [0; 4];
+
 
     loop {
 
         //termopaari kivi lugemine
+        let mut data = [0; 4];
         cs1.set_high();
         delay.delay_ms(1_u32);
         cs1.set_low();
+        delay.delay_ms(1_u32);
         spi.transfer(&mut data[..]).unwrap();
+        //delay.delay_ms(1_u32);
 
         // 200 baidine buffer
         let mut buf = ArrayString::<200>::new();
         for x in data {
             write!(&mut buf, "x= {}\r\n", x).ok();
         }
-
+        let y="hello";
         free(|cs| serial.write(buf.as_bytes()));
+        //free(|cs| serial.write(y.as_bytes()));
     }
 
     #[interrupt]
@@ -155,9 +156,7 @@ fn main() -> ! {
         let mut usb_dev = unsafe { USB_DEVICE.as_mut().unwrap() };
 
         free(|_| {
-            usb_dev.poll(&mut [serial]);
-            //if !usb_dev.poll(&mut [serial]) {
-            //}
+            if !usb_dev.poll(&mut [serial]) {}
         });
     }
 }
