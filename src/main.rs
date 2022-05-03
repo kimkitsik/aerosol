@@ -134,6 +134,7 @@ mod app {
                 ctx.local.spi.transfer(&mut data[..]).unwrap();
                 let x = u32::from_be_bytes(&data[0..4]);
 
+
                 //write!(&mut buf, "{}\r\n", time);
                 for x in data {
                     write!(&mut buf, "x= {}\r\n", x).ok();
