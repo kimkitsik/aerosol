@@ -2,6 +2,7 @@
 #![no_std]
 
 extern crate panic_halt;
+
 use panic_halt as _;
 
 use core::fmt::Write;
@@ -15,9 +16,12 @@ use stm32f4xx_hal as hal;
 use stm32f4xx_hal::i2c::Error::Timeout;
 use stm32f4xx_hal::otg_fs::{UsbBus, USB};
 use stm32f4xx_hal::{prelude::*};
+use stm32f4xx_hal::serial::Serial;
 use stm32f4xx_hal::spi::{Mode, Phase, Polarity, Spi};
 use stm32f4xx_hal::time::Hertz;
+use usb_device::bus::UsbBusAllocator;
 use usb_device::prelude::*;
+use usbd_serial::SerialPort;
 
 use crate::hal::{
     gpio::{Edge, Input, PC13},
@@ -29,9 +33,12 @@ use crate::hal::{
 };
 
 static mut EP_MEMORY: [u32; 1024] = [0; 1024];
-static TIMER_TIM2: Mutex<RefCell<Option<CounterUs<pac::TIM2>>>> = Mutex::new(RefCell::new(None));
+static USB_OTG_FS: Mutex<RefCell<Option<CounterUs<pac::TIM2>>>> = Mutex::new(RefCell::new(None));
 static USB_STATE: Mutex<Cell<bool>> = Mutex::new(Cell::new(false));
 
+static mut SERIAL_PORT: Option<SerialPort<UsbBus<USB>>> = None;
+static mut USB_DEVICE: Option<UsbDevice<UsbBus<USB>>> = None;
+static mut USB_BUS: Option<UsbBusAllocator<UsbBus<USB>>> = None;
 
 #[entry]
 fn main() -> ! {
@@ -75,11 +82,11 @@ fn main() -> ! {
 
     //USB init
 
-        //väike pauss, simuleerib USB restarti.
+    //väike pauss, simuleerib USB restarti.
     let mut usb_pin_d_plus = gpioa.pa12.into_push_pull_output();
     usb_pin_d_plus.set_low();
     delay.delay_ms(100_u32);
-        // Now we can connect as a USB serial device to the host.
+    // Now we can connect as a USB serial device to the host.
     let usb_pin_d_plus = usb_pin_d_plus.into_alternate();
     let usb_pin_d_minus = gpioa.pa11.into_alternate();
 
@@ -91,16 +98,22 @@ fn main() -> ! {
         pin_dp: usb_pin_d_plus,
         hclk: clocks.hclk(),
     };
-    let usb_bus = UsbBus::new(usb, unsafe { &mut EP_MEMORY });
-    let mut serial = usbd_serial::SerialPort::new(&usb_bus);
-    let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x16c0, 0x27dd))
-        //.self_powered(true)
-        .manufacturer("Fake company")
-        //.device_release(0x0010)
-        .product("Serial port")
-        .serial_number("TEST")
-        .device_class(usbd_serial::USB_CLASS_CDC)
-        .build();
+
+    unsafe {
+        USB_BUS = Some(UsbBus::new(usb, unsafe { &mut EP_MEMORY }));
+        SERIAL_PORT = Some(usbd_serial::SerialPort::new(USB_BUS.as_ref().unwrap()));
+        USB_DEVICE = Some(UsbDeviceBuilder::new(USB_BUS.as_ref().unwrap(), UsbVidPid(0x16c0, 0x27dd))
+            //.self_powered(true)
+            .manufacturer("Fake company")
+            //.device_release(0x0010)
+            .product("Serial port")
+            .serial_number("TEST")
+            .device_class(usbd_serial::USB_CLASS_CDC)
+            .build());
+    }
+
+    let mut serial = unsafe { SERIAL_PORT.as_mut().unwrap() };
+    // let mut usb_dev = unsafe { USB_DEVICE.as_mut().unwrap() };
 
     // Set up the interrupt timer
     let mut timer = dp.TIM2.counter(&clocks);
@@ -108,16 +121,16 @@ fn main() -> ! {
     timer.listen(Event::Update);
 
     free(|cs| {
-        TIMER_TIM2.borrow(cs).replace(Some(timer));
+        USB_OTG_FS.borrow(cs).replace(Some(timer));
     });
 
     // Enable interrupt
-    pac::NVIC::unpend(hal::pac::Interrupt::TIM2);
+    pac::NVIC::unpend(hal::pac::Interrupt::OTG_FS);
     unsafe {
-        pac::NVIC::unmask(hal::pac::Interrupt::TIM2);
+        pac::NVIC::unmask(hal::pac::Interrupt::OTG_FS);
     }
 
-    let mut data = [0;4];
+    let mut data = [0; 4];
 
     loop {
 
@@ -130,30 +143,21 @@ fn main() -> ! {
         // 200 baidine buffer
         let mut buf = ArrayString::<200>::new();
         for x in data {
-            write!(&mut buf, "x= {}\r\n",x).ok();
+            write!(&mut buf, "x= {}\r\n", x).ok();
         }
 
-        if free(|cs| USB_STATE.borrow(cs).get()) {
-            serial.write(buf.as_bytes());
-        } else {
-            continue;
-            //led.set_low();
-        }
-        //usb_dev.poll(&mut [&mut serial]);
+        free(|cs| serial.write(buf.as_bytes()));
     }
 
     #[interrupt]
-    fn TIM2() {
-        free(|cs| {
-            if let Some(ref mut tim2) = TIMER_TIM2.borrow(cs).borrow_mut().deref_mut() {
-                tim2.clear_interrupt(Event::Update);
-            }
+    fn OTG_FS() {
+        let mut serial = unsafe { SERIAL_PORT.as_mut().unwrap() };
+        let mut usb_dev = unsafe { USB_DEVICE.as_mut().unwrap() };
 
-
-            //usb_dev.poll(&mut [&mut serial]);
-
-            //let led_state = LED_STATE.borrow(cs);
-            //led_state.replace(led_state.get().not());
+        free(|_| {
+            usb_dev.poll(&mut [serial]);
+            //if !usb_dev.poll(&mut [serial]) {
+            //}
         });
     }
 }
