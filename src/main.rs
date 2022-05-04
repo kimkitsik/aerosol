@@ -1,7 +1,6 @@
 #![no_std]
 #![no_main]
 
-
 use core::sync::atomic::{AtomicU32, Ordering};
 use cortex_m;
 use cortex_m::peripheral::SYST;
@@ -25,6 +24,8 @@ mod app {
     use stm32f4xx_hal::otg_fs::{USB, UsbBus};
     use stm32f4xx_hal::prelude::*;
     use stm32f4xx_hal::spi::{Mode, Phase, Polarity, Spi};
+    use systick_monotonic::fugit::Duration;
+    use systick_monotonic::Systick;
     use usb_device::class_prelude::UsbBusAllocator;
     use usb_device::prelude::*;
 
@@ -45,6 +46,7 @@ mod app {
         cs1: stm32f4xx_hal::gpio::Pin<'A', 4_u8, Output>,
         delay: stm32f4xx_hal::timer::Delay<stm32f4xx_hal::pac::TIM5, 1000000_u32>,
     }
+
 
     #[init]
     fn init(mut ctx: init::Context) -> (Shared, Local, init::Monotonics) {
@@ -115,7 +117,7 @@ mod app {
         (Shared { serial }, Local { usb_dev, spi, cs1, delay }, init::Monotonics())
     }
 
-    #[idle(shared = [serial], local = [spi, cs1, delay])]
+    #[idle(shared = [serial])] //, local = [spi, cs1, delay]
     fn idle(mut ctx: idle::Context) -> ! {
         let mut next_time = get_time();
 
@@ -123,26 +125,12 @@ mod app {
             let time = get_time();
 
             if time > next_time {
-                let mut buf = ArrayString::<200>::new();
-                let mut data = [0u8; 4];
-
-                ctx.local.cs1.set_high();
-                ctx.local.delay.delay_ms(1_u32);
-                ctx.local.cs1.set_low();
-                ctx.local.delay.delay_ms(1_u32);
-
-                ctx.local.spi.transfer(&mut data[..]).unwrap();
-                let x = u32::from_be_bytes(&data[0..4]);
+                //termopaari lugemine
 
 
-                //write!(&mut buf, "{}\r\n", time);
-                for x in data {
-                    write!(&mut buf, "x= {}\r\n", x).ok();
-                }
+                read_thermo();
+                //read_thermo::spawn_after().unwrap();
 
-                ctx.shared.serial.lock(|serial| {
-                    serial.write(&mut buf.as_bytes()); //.as_bytes()
-                });
                 next_time += 1000000000;
             }
 
@@ -161,10 +149,33 @@ mod app {
             }
         });
     }
-
     #[task(binds = SysTick, priority = 15)]
     fn systick_tick(_: systick_tick::Context) {
         crate::TIME.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[task(local=[cs1,delay,spi])]
+    fn read_thermo(_: read_thermo::Context){
+        let mut buf = ArrayString::<200>::new();
+        let mut data = [0u8; 4];
+
+        ctx.local.cs1.set_high();
+        ctx.local.delay.delay_ms(1_u32);
+        ctx.local.cs1.set_low();
+        ctx.local.delay.delay_ms(1_u32);
+
+        ctx.local.spi.transfer(&mut data[..]).unwrap();
+        let x = u32::from_be_bytes(data);
+
+        let temp = (((x >> 16) as i16) / 4) as f32 * 0.25;
+
+        write!(&mut buf, "{}\r\n", temp);
+        ctx.shared.serial.lock(|serial| {
+            serial.write(&mut buf.as_bytes()); //.as_bytes()
+            //serial.write(temp);
+        });
+
+        //read_thermo::spawn_after(Duration::<u64, 1, 1000>::from_ticks(1000)).ok();
     }
 }
 
@@ -176,9 +187,6 @@ fn systick_init(syst: &mut SYST, clocks: Clocks) {
     syst.enable_interrupt();
     syst.enable_counter();
 }
-
-
-
 
 pub fn get_time() -> u64 {
     loop {
