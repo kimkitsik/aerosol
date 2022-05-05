@@ -2,16 +2,19 @@
 #![no_main]
 
 use core::sync::atomic::{AtomicU32, Ordering};
+use arrayvec::ArrayString;
 use cortex_m;
 use cortex_m::peripheral::SYST;
+use embedded_hal::digital::v2::OutputPin;
 use max31855::Error;
 use panic_halt as _;
 use stm32f4xx_hal::rcc::Clocks;
-use max31855::Max31855;
+use stm32f4xx_hal::gpio::{Alternate, Output};
 
 pub static TIME: AtomicU32 = AtomicU32::new(0);
 pub const SYS_CK_MHZ: u32 = 144;
 pub const SYST_RELOAD: u32 = (SYS_CK_MHZ * 1000) - 1;
+
 
 #[rtic::app(device = stm32f4xx_hal::pac)]
 mod app {
@@ -19,6 +22,9 @@ mod app {
     use core::sync::atomic::Ordering;
 
     use arrayvec::ArrayString;
+    use embedded_hal::blocking::delay::DelayUs;
+    use embedded_hal::blocking::spi::Transfer;
+    use embedded_hal::digital::v2::OutputPin;
     use max31855::Unit;
     use stm32f4xx_hal::gpio::{Alternate, Output};
     use stm32f4xx_hal::otg_fs::{USB, UsbBus};
@@ -44,6 +50,8 @@ mod app {
         usb_dev: UsbDevice<'static, UsbBus<USB>>,
         spi: Spi<stm32f4xx_hal::pac::SPI1, (stm32f4xx_hal::gpio::Pin<'A', 5_u8, Alternate<5_u8>>, stm32f4xx_hal::gpio::Pin<'A', 6_u8, Alternate<5_u8>>, stm32f4xx_hal::gpio::Pin<'A', 7_u8, Alternate<5_u8>>)>,
         cs1: stm32f4xx_hal::gpio::Pin<'A', 4_u8, Output>,
+        cs2: stm32f4xx_hal::gpio::Pin<'A', 8_u8, Output>,
+        cs3: stm32f4xx_hal::gpio::Pin<'A', 9_u8, Output>,
         delay: stm32f4xx_hal::timer::Delay<stm32f4xx_hal::pac::TIM5, 1000000_u32>,
     }
 
@@ -114,25 +122,48 @@ mod app {
                 .build();
         }
 
-        (Shared { serial }, Local { usb_dev, spi, cs1, delay }, init::Monotonics())
+        (Shared { serial }, Local { usb_dev, spi, cs1, cs2, cs3, delay }, init::Monotonics())
     }
 
-    #[idle(shared = [serial])] //, local = [spi, cs1, delay]
+    #[idle(shared = [serial], local = [spi, cs1, cs2, cs3, delay])]
     fn idle(mut ctx: idle::Context) -> ! {
         let mut next_time = get_time();
 
+        let cs1 = ctx.local.cs1;
+        let cs2 = ctx.local.cs2;
+        let cs3 = ctx.local.cs3;
+        //let cs4 = ctx.local.cs4;
+        let spi = ctx.local.spi;
+        let delay = ctx.local.delay;
+
         loop {
             let time = get_time();
+            let mut buf = ArrayString::<200>::new();
 
             if time > next_time {
-                //termopaari lugemine
+/*
+                //termopaari nr.1 lugemine
+                let temp = read_temp_thermo(cs1, spi, delay);
+                write!(&mut buf, "termopaar nr1: {}\r\n", temp);
+                //termopaari nr.2 lugemine
+                let temp = read_temp_thermo(cs2, spi, delay);
+                write!(&mut buf, "termopaar nr2: {}\r\n", temp);
+                //termopaari nr.2 lugemine
+                let temp = read_temp_thermo(cs3, spi, delay);
+                write!(&mut buf, "termopaar nr3: {}\r\n\n", temp);
 
-
-                read_thermo();
-                //read_thermo::spawn_after().unwrap();
+ */
+                let (temp,inttemp) = read_temperature(cs1, spi, delay);
+                write!(&mut buf, "termopaar väline nr1: {}\r\n", temp);
+                write!(&mut buf, "termopaar sisemine nr1: {}\r\n", inttemp);
 
                 next_time += 1000000000;
             }
+
+            ctx.shared.serial.lock(|serial| {
+                serial.write(&mut buf.as_bytes()); //.as_bytes()
+                //serial.write(temp);
+            });
 
             ctx.shared.serial.lock(|serial| {
                 let mut buf = [0u8; 64];
@@ -140,7 +171,36 @@ mod app {
             });
         }
     }
+    fn read_temperature(cs_pin: &mut impl OutputPin, mut spi: &mut impl Transfer<u8>, mut delay: &mut impl DelayUs<u32>) -> (f32,f32) {
+        cs_pin.set_low();
+        delay.delay_us(10);
+        let mut data = [0u8; 4];
+        spi.transfer(&mut data[..]).ok();
+        cs_pin.set_high();
 
+        let x = u32::from_be_bytes(data);
+
+        let temp = (((x >> 16) as i16) >> 2) as f32 * 0.25;
+        let inttemp = ((x as i16) >> 4) as f32 * 0.0625;
+        (temp,inttemp)
+    }
+    fn read_temp_internal(cs_pin: &mut impl OutputPin, mut spi: &mut impl Transfer<u8>, mut delay: &mut impl DelayUs<u32>) -> f32 {
+        cs_pin.set_low();
+        delay.delay_us(10);
+        let mut data = [0u8; 4];
+        spi.transfer(&mut data[..]).ok();
+        cs_pin.set_high();
+
+        let x = u32::from_be_bytes(data);
+
+        let second_u16 = (data[2] as u16) << 8 |
+            (data[3] as u16) << 0;
+
+        let temp = ((second_u16 as i16) / 16 ) as f32 * 0.0625;
+        //let temp = second_u16 as f32 * 0.0625;
+        temp
+        //internal
+    }
     #[task(binds = OTG_FS, local = [usb_dev], shared = [serial])]
     fn otg_fs_event(mut ctx: otg_fs_event::Context) {
         ctx.shared.serial.lock(|serial: &mut usbd_serial::SerialPort<'static, UsbBus<USB>>| {
@@ -149,33 +209,10 @@ mod app {
             }
         });
     }
+
     #[task(binds = SysTick, priority = 15)]
     fn systick_tick(_: systick_tick::Context) {
         crate::TIME.fetch_add(1, Ordering::Relaxed);
-    }
-
-    #[task(local=[cs1,delay,spi])]
-    fn read_thermo(_: read_thermo::Context){
-        let mut buf = ArrayString::<200>::new();
-        let mut data = [0u8; 4];
-
-        ctx.local.cs1.set_high();
-        ctx.local.delay.delay_ms(1_u32);
-        ctx.local.cs1.set_low();
-        ctx.local.delay.delay_ms(1_u32);
-
-        ctx.local.spi.transfer(&mut data[..]).unwrap();
-        let x = u32::from_be_bytes(data);
-
-        let temp = (((x >> 16) as i16) / 4) as f32 * 0.25;
-
-        write!(&mut buf, "{}\r\n", temp);
-        ctx.shared.serial.lock(|serial| {
-            serial.write(&mut buf.as_bytes()); //.as_bytes()
-            //serial.write(temp);
-        });
-
-        //read_thermo::spawn_after(Duration::<u64, 1, 1000>::from_ticks(1000)).ok();
     }
 }
 
@@ -200,3 +237,4 @@ pub fn get_time() -> u64 {
         }
     }
 }
+
