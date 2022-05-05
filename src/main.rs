@@ -18,14 +18,14 @@ pub const SYST_RELOAD: u32 = (SYS_CK_MHZ * 1000) - 1;
 
 #[rtic::app(device = stm32f4xx_hal::pac)]
 mod app {
-    use core::fmt::Write;
+    use core::fmt::{Debug, Write};
     use core::sync::atomic::Ordering;
 
     use arrayvec::ArrayString;
     use embedded_hal::blocking::delay::DelayUs;
     use embedded_hal::blocking::spi::Transfer;
     use embedded_hal::digital::v2::OutputPin;
-    use max31855::Unit;
+    //use max31855::{FullResult, Unit};
     use stm32f4xx_hal::gpio::{Alternate, Output};
     use stm32f4xx_hal::otg_fs::{USB, UsbBus};
     use stm32f4xx_hal::prelude::*;
@@ -36,9 +36,24 @@ mod app {
     use usb_device::prelude::*;
 
     use crate::{get_time, SYS_CK_MHZ, systick_init};
+    //use crate::app::TempError::error;
 
     static mut EP_MEMORY: [u32; 1024] = [0; 1024];
     static mut USB_BUS: Option<UsbBusAllocator<UsbBus<USB>>> = None;
+
+    #[derive(Debug)]
+    pub enum E {
+        /// temperatuuri lugemise viga
+        NoConnectionError,
+    }
+
+    #[derive(Debug)]
+    pub struct FullResult {
+        /// The temperature of the thermocouple
+        pub temp: f32,
+        /// The temperature of the MAX31855 reference junction
+        pub inttemp: f32,
+    }
 
     #[shared]
     struct Shared {
@@ -125,6 +140,7 @@ mod app {
         (Shared { serial }, Local { usb_dev, spi, cs1, cs2, cs3, delay }, init::Monotonics())
     }
 
+
     #[idle(shared = [serial], local = [spi, cs1, cs2, cs3, delay])]
     fn idle(mut ctx: idle::Context) -> ! {
         let mut next_time = get_time();
@@ -136,26 +152,18 @@ mod app {
         let spi = ctx.local.spi;
         let delay = ctx.local.delay;
 
+        //peamine loop
         loop {
             let time = get_time();
             let mut buf = ArrayString::<200>::new();
 
             if time > next_time {
-/*
-                //termopaari nr.1 lugemine
-                let temp = read_temp_thermo(cs1, spi, delay);
-                write!(&mut buf, "termopaar nr1: {}\r\n", temp);
-                //termopaari nr.2 lugemine
-                let temp = read_temp_thermo(cs2, spi, delay);
-                write!(&mut buf, "termopaar nr2: {}\r\n", temp);
-                //termopaari nr.2 lugemine
-                let temp = read_temp_thermo(cs3, spi, delay);
-                write!(&mut buf, "termopaar nr3: {}\r\n\n", temp);
 
- */
-                let (temp,inttemp) = read_temperature(cs1, spi, delay);
-                write!(&mut buf, "termopaar väline nr1: {}\r\n", temp);
-                write!(&mut buf, "termopaar sisemine nr1: {}\r\n", inttemp);
+                //temp andur 1:
+                match read_temperature(cs1, spi, delay) {
+                    Ok(r) => write!(&mut buf, "termopaar väline nr1: {}\r\n", r.temp),
+                    Err(e) => write!(&mut buf, "termopaar väline nr1: {:?}\r\n", e)
+                };
 
                 next_time += 1000000000;
             }
@@ -171,7 +179,10 @@ mod app {
             });
         }
     }
-    fn read_temperature(cs_pin: &mut impl OutputPin, mut spi: &mut impl Transfer<u8>, mut delay: &mut impl DelayUs<u32>) -> (f32,f32) {
+    ///funktsioon loeb termopaarilt saadud bittide jada ja tagastab termopaari
+    /// temperatuuri C ning MAX31855 kivi sisemist temperatuuri.
+    ///Samuti tagastab ka veakoodi, kui miskit on valesti.
+    fn read_temperature(cs_pin: &mut impl OutputPin, mut spi: &mut impl Transfer<u8>, mut delay: &mut impl DelayUs<u32>) -> Result<FullResult, E> {
         cs_pin.set_low();
         delay.delay_us(10);
         let mut data = [0u8; 4];
@@ -179,28 +190,25 @@ mod app {
         cs_pin.set_high();
 
         let x = u32::from_be_bytes(data);
+        let fault = ((x & 0x10000) >> 16);
+        let noConnection = (x & 0x1);
 
         let temp = (((x >> 16) as i16) >> 2) as f32 * 0.25;
         let inttemp = ((x as i16) >> 4) as f32 * 0.0625;
-        (temp,inttemp)
+
+        //fault bit on 1 kui esineb viga. Edasi kontrollitakse, mis viga täpsemalt oli
+        if fault == 1 {
+            if noConnection == 1 {
+                return Err(E::NoConnectionError);
+            }
+        }
+
+        Ok(FullResult {
+            temp,
+            inttemp,
+        })
     }
-    fn read_temp_internal(cs_pin: &mut impl OutputPin, mut spi: &mut impl Transfer<u8>, mut delay: &mut impl DelayUs<u32>) -> f32 {
-        cs_pin.set_low();
-        delay.delay_us(10);
-        let mut data = [0u8; 4];
-        spi.transfer(&mut data[..]).ok();
-        cs_pin.set_high();
 
-        let x = u32::from_be_bytes(data);
-
-        let second_u16 = (data[2] as u16) << 8 |
-            (data[3] as u16) << 0;
-
-        let temp = ((second_u16 as i16) / 16 ) as f32 * 0.0625;
-        //let temp = second_u16 as f32 * 0.0625;
-        temp
-        //internal
-    }
     #[task(binds = OTG_FS, local = [usb_dev], shared = [serial])]
     fn otg_fs_event(mut ctx: otg_fs_event::Context) {
         ctx.shared.serial.lock(|serial: &mut usbd_serial::SerialPort<'static, UsbBus<USB>>| {
