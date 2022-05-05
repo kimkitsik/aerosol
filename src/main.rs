@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+mod pdm;
+
 use core::sync::atomic::{AtomicU32, Ordering};
 use arrayvec::ArrayString;
 use cortex_m;
@@ -20,7 +22,6 @@ pub const SYST_RELOAD: u32 = (SYS_CK_MHZ * 1000) - 1;
 mod app {
     use core::fmt::{Debug, Write};
     use core::sync::atomic::Ordering;
-
     use arrayvec::ArrayString;
     use embedded_hal::blocking::delay::DelayUs;
     use embedded_hal::blocking::spi::Transfer;
@@ -34,9 +35,10 @@ mod app {
     use systick_monotonic::Systick;
     use usb_device::class_prelude::UsbBusAllocator;
     use usb_device::prelude::*;
-
+    use crate::pdm::Pdm;
     use crate::{get_time, SYS_CK_MHZ, systick_init};
-    //use crate::app::TempError::error;
+
+    //mod pdm;
 
     static mut EP_MEMORY: [u32; 1024] = [0; 1024];
     static mut USB_BUS: Option<UsbBusAllocator<UsbBus<USB>>> = None;
@@ -67,6 +69,11 @@ mod app {
         cs1: stm32f4xx_hal::gpio::Pin<'A', 4_u8, Output>,
         cs2: stm32f4xx_hal::gpio::Pin<'A', 8_u8, Output>,
         cs3: stm32f4xx_hal::gpio::Pin<'A', 9_u8, Output>,
+        kyte1: stm32f4xx_hal::gpio::Pin<'C', 0_u8, Output>,
+        kyte2: stm32f4xx_hal::gpio::Pin<'C', 1_u8, Output>,
+        kyte3: stm32f4xx_hal::gpio::Pin<'C', 2_u8, Output>,
+        peltier1: stm32f4xx_hal::gpio::Pin<'A', 1_u8, Output>,
+        peltier2: stm32f4xx_hal::gpio::Pin<'A', 2_u8, Output>,
         delay: stm32f4xx_hal::timer::Delay<stm32f4xx_hal::pac::TIM5, 1000000_u32>,
     }
 
@@ -87,6 +94,7 @@ mod app {
 
         systick_init(&mut ctx.core.SYST, clocks);
         let gpioa = device.GPIOA.split();
+        let gpioc = device.GPIOC.split();
 
         let mut delay = device.TIM5.delay_us(&clocks);
         let mut cs1 = gpioa.pa4.into_push_pull_output();
@@ -96,6 +104,11 @@ mod app {
         let sck = gpioa.pa5.into_alternate();
         let miso = gpioa.pa6.into_alternate();
         let mosi = gpioa.pa7.into_alternate();
+        let mut kyte1=gpioc.pc0.into_push_pull_output();
+        let mut kyte2=gpioc.pc1.into_push_pull_output();
+        let mut kyte3=gpioc.pc2.into_push_pull_output();
+        let mut peltier1=gpioa.pa1.into_push_pull_output();
+        let mut peltier2=gpioa.pa2.into_push_pull_output();
 
         let mode = Mode {
             polarity: Polarity::IdleLow,
@@ -137,11 +150,12 @@ mod app {
                 .build();
         }
 
-        (Shared { serial }, Local { usb_dev, spi, cs1, cs2, cs3, delay }, init::Monotonics())
+        (Shared { serial }, Local {usb_dev,spi,cs1,cs2,cs3,kyte1,kyte2,kyte3,peltier1,peltier2,delay},
+         init::Monotonics())
     }
 
 
-    #[idle(shared = [serial], local = [spi, cs1, cs2, cs3, delay])]
+    #[idle(shared = [serial], local = [spi,cs1,cs2,cs3,kyte1,kyte2,kyte3,peltier1,peltier2,delay])]
     fn idle(mut ctx: idle::Context) -> ! {
         let mut next_time = get_time();
 
@@ -150,20 +164,41 @@ mod app {
         let cs3 = ctx.local.cs3;
         //let cs4 = ctx.local.cs4;
         let spi = ctx.local.spi;
+        let kyte1 = ctx.local.kyte1;
+        let kyte2 = ctx.local.kyte2;
+        let kyte3 = ctx.local.kyte3;
+        let peltier1 = ctx.local.peltier1;
+        let peltier2 = ctx.local.peltier2;
+
         let delay = ctx.local.delay;
+
+        //pdm
+        let mut pdm1 = Pdm::new(10, 2);
+        let mut pdm2 = Pdm::new(10, 0);
+        pdm1.set_target(0.2);
+        pdm2.set_target(0.5);
 
         //peamine loop
         loop {
             let time = get_time();
             let mut buf = ArrayString::<200>::new();
 
+            match pdm1.poll(time) {
+                None => {},
+                Some(true) => {
+                    kyte1.set_high();
+                },
+                Some(false) => {
+                    kyte1.set_low();
+                },
+            }
             if time > next_time {
-
+/*
                 //temp andur 1:
                 match read_temperature(cs1, spi, delay) {
                     Ok(r) => write!(&mut buf, "termopaar väline nr1: {}\r\n", r.temp),
                     Err(e) => write!(&mut buf, "termopaar väline nr1: {:?}\r\n", e)
-                };
+                };*/
 
                 next_time += 1000000000;
             }
