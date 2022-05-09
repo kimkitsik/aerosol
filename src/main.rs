@@ -236,6 +236,7 @@ mod app {
                 PID_d = 0.01*kd*((PID_error - previous_error)/(PID_time as f64/1000.0));
                 PID_value = PID_p + PID_i + PID_d;
 
+
                 //lisada: juhtimine
 
                 previous_error = PID_error;
