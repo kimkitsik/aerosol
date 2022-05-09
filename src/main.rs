@@ -104,11 +104,11 @@ mod app {
         let sck = gpioa.pa5.into_alternate();
         let miso = gpioa.pa6.into_alternate();
         let mosi = gpioa.pa7.into_alternate();
-        let mut kyte1=gpioc.pc0.into_push_pull_output();
-        let mut kyte2=gpioc.pc1.into_push_pull_output();
-        let mut kyte3=gpioc.pc2.into_push_pull_output();
-        let mut peltier1=gpioa.pa1.into_push_pull_output();
-        let mut peltier2=gpioa.pa2.into_push_pull_output();
+        let mut kyte1 = gpioc.pc0.into_push_pull_output();
+        let mut kyte2 = gpioc.pc1.into_push_pull_output();
+        let mut kyte3 = gpioc.pc2.into_push_pull_output();
+        let mut peltier1 = gpioa.pa1.into_push_pull_output();
+        let mut peltier2 = gpioa.pa2.into_push_pull_output();
 
         let mode = Mode {
             polarity: Polarity::IdleLow,
@@ -150,15 +150,14 @@ mod app {
                 .build();
         }
 
-        (Shared { serial }, Local {usb_dev,spi,cs1,cs2,cs3,kyte1,kyte2,kyte3,peltier1,peltier2,delay},
+        (Shared { serial }, Local { usb_dev, spi, cs1, cs2, cs3, kyte1, kyte2, kyte3, peltier1, peltier2, delay },
          init::Monotonics())
     }
 
 
-    #[idle(shared = [serial], local = [spi,cs1,cs2,cs3,kyte1,kyte2,kyte3,peltier1,peltier2,delay])]
+    #[idle(shared = [serial], local = [spi, cs1, cs2, cs3, kyte1, kyte2, kyte3, peltier1, peltier2, delay])]
     fn idle(mut ctx: idle::Context) -> ! {
         let mut next_time = get_time();
-
         let cs1 = ctx.local.cs1;
         let cs2 = ctx.local.cs2;
         let cs3 = ctx.local.cs3;
@@ -169,51 +168,133 @@ mod app {
         let kyte3 = ctx.local.kyte3;
         let peltier1 = ctx.local.peltier1;
         let peltier2 = ctx.local.peltier2;
-
         let delay = ctx.local.delay;
 
         //pdm
-        let mut pdm1 = Pdm::new(10, 2);
-        let mut pdm2 = Pdm::new(10, 0);
-        pdm1.set_target(0.2);
-        pdm2.set_target(0.5);
+        let mut pdm1 = Pdm::new(500000000, 0);
+        let mut pdm2 = Pdm::new(1000000000, 0);
+        pdm1.set_target(0.0);
+        pdm2.set_target(0.0);
+        kyte1.set_low();
+
+        //PID variables
+        let mut target_temp = 30.0; //setpoint
+        let mut PID_error = 0.0;
+        let mut previous_error = 0.0;
+        let (mut elapsedTime,mut Time,mut timePrev): (f32,f32,f32);
+        let mut PID_value = 0.0;
+        let mut temperature_read = 0.0;
+        let mut last_set_temperature = 0.0;
+
+        //PID constants
+        let (mut kp,mut ki,mut kd)=(90.0, 30.0, 80.0);
+        let (mut PID_p,mut PID_i,mut PID_d)=(0.0, 0.0, 0.0);
+
+
 
         //peamine loop
         loop {
             let time = get_time();
-            let mut buf = ArrayString::<200>::new();
+            let mut termopaar_buf = ArrayString::<200>::new();
+            let mut feedback_buf = ArrayString::<200>::new(); //testimiseks
 
-            match pdm1.poll(time) {
-                None => {},
-                Some(true) => {
-                    kyte1.set_high();
-                },
-                Some(false) => {
-                    kyte1.set_low();
-                },
-            }
+
+            /* ctx.shared.serial.lock(|serial| {
+                 match serial.read(buf.as_mut_slice()) {
+                     Ok(count) if count > 0 => {
+                         for c in buf[0..count].iter_mut() {
+                             //write!(&mut feedback_buf, "{}\r\n", c);
+                             target_temp = buf[c] as f32;
+                         }
+
+                     }
+                     _ => {}
+                 }
+             });*/
+
+
+
+
+
+
+
+
             if time > next_time {
-/*
                 //temp andur 1:
                 match read_temperature(cs1, spi, delay) {
-                    Ok(r) => write!(&mut buf, "termopaar väline nr1: {}\r\n", r.temp),
-                    Err(e) => write!(&mut buf, "termopaar väline nr1: {:?}\r\n", e)
-                };*/
+                    Ok(r) => {
+                        write!(&mut termopaar_buf, "termopaar väline nr1: {}\r\n", r.temp);
+                        temperature_read = r.temp as f64;
+                    }
+                    Err(e) => { write!(&mut termopaar_buf, "termopaar väline nr1: {:?}\r\n", e); }
+                };
 
-                next_time += 1000000000;
+                PID_error = target_temp - temperature_read + 3.0; //arvutame vea sihttemp ja päris temp vahel
+                PID_p = (0.01 * kp * PID_error) as f64;
+                PID_i = 0.01*PID_i + (ki * PID_error);
+                let PID_time = get_time();
+                PID_d = 0.01*kd*((PID_error - previous_error)/(PID_time as f64/1000.0));
+                PID_value = PID_p + PID_i + PID_d;
+
+                //lisada: juhtimine
+
+                previous_error = PID_error;
+
+                next_time += 100000000;
             }
+            /*
+            //kontroll, kas saadud temperatuur on madalam soovitud temperatuurist. Kui on, siis läheb
+            //küttekeha tööle
+            if temperature_read < target_temp {
+                if target_temp - temperature_read > 1.0 {
+                    pdm1.set_target(1.0);
+                } else { pdm1.set_target(0.0); }
+                //kui praegune temp liiga suur, siis jahutame peltieriga
+            } else if temperature_read >= target_temp {
+                if temperature_read - target_temp > 1.0 {
+                    pdm2.set_target(1.0);
+                } else { pdm2.set_target(0.0); }
+
+            }*/
+
+
+            match pdm1.poll(time) {
+                None => {}
+                Some(true) => {
+                    kyte1.set_high();
+                }
+                Some(false) => {
+                    kyte1.set_low();
+                }
+            }
+            match pdm2.poll(time) {
+                None => {}
+                Some(true) => {
+                    kyte1.set_low();
+                    peltier2.set_high();
+                }
+                Some(false) => {
+                    peltier2.set_low();
+                }
+            }
+            //write!(&mut feedback_buf, "termopaar väline nr1: {:?}\r\n", temp_feedback); //feedback testimiseks
+            //write!(&mut feedback_buf, "temp target: {:?}\r\n", target_temp); //feedback testimiseks
+            let mut test = [0u8, 4];
+            let mut buf = ArrayString::<200>::new();
+            write!(&mut buf, "PID value: {}\r\n", PID_value);
 
             ctx.shared.serial.lock(|serial| {
-                serial.write(&mut buf.as_bytes()); //.as_bytes()
-                //serial.write(temp);
+                serial.write(&mut termopaar_buf.as_bytes());
+                serial.write(&mut buf.as_bytes());
             });
 
-            ctx.shared.serial.lock(|serial| {
+            /*ctx.shared.serial.lock(|serial| {
                 let mut buf = [0u8; 64];
                 serial.read(&mut buf);
-            });
+            });*/
         }
     }
+
     ///funktsioon loeb termopaarilt saadud bittide jada ja tagastab termopaari
     /// temperatuuri C ning MAX31855 kivi sisemist temperatuuri.
     ///Samuti tagastab ka veakoodi, kui miskit on valesti.
@@ -280,4 +361,3 @@ pub fn get_time() -> u64 {
         }
     }
 }
-
