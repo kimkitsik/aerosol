@@ -169,6 +169,7 @@ mod app {
         let peltier1 = ctx.local.peltier1;
         let peltier2 = ctx.local.peltier2;
         let delay = ctx.local.delay;
+        let mut state="";
 
         //pdm
         let mut pdm1 = Pdm::new(500000000, 0);
@@ -178,7 +179,7 @@ mod app {
         kyte1.set_low();
 
         //PID variables
-        let mut target_temp = 30.0; //setpoint
+        let mut target_temp = 57.0; //setpoint
         let mut PID_error = 0.0;
         let mut previous_error = 0.0;
         let (mut elapsedTime,mut Time,mut timePrev): (f32,f32,f32);
@@ -187,10 +188,8 @@ mod app {
         let mut last_set_temperature = 0.0;
 
         //PID constants
-        let (mut kp,mut ki,mut kd)=(90.0, 30.0, 80.0);
+        let (mut kp,mut ki,mut kd)=(0.06, 0.0, 0.1);
         let (mut PID_p,mut PID_i,mut PID_d)=(0.0, 0.0, 0.0);
-
-
 
         //peamine loop
         loop {
@@ -213,58 +212,46 @@ mod app {
              });*/
 
 
-
-
-
-
-
-
             if time > next_time {
-                //temp andur 1:
+                //temp andur 1 lugemine:
                 match read_temperature(cs1, spi, delay) {
                     Ok(r) => {
-                        write!(&mut termopaar_buf, "termopaar väline nr1: {}\r\n", r.temp);
+                        write!(&mut termopaar_buf, "termo1: {}", r.temp);
                         temperature_read = r.temp as f64;
                     }
-                    Err(e) => { write!(&mut termopaar_buf, "termopaar väline nr1: {:?}\r\n", e); }
+                    Err(e) => { write!(&mut termopaar_buf, "termo1: {:?}\r\n", e); }
                 };
-
-                PID_error = target_temp - temperature_read + 3.0; //arvutame vea sihttemp ja päris temp vahel
-                PID_p = (0.01 * kp * PID_error) as f64;
-                PID_i = 0.01*PID_i + (ki * PID_error);
-                let PID_time = get_time();
-                PID_d = 0.01*kd*((PID_error - previous_error)/(PID_time as f64/1000.0));
+                //PID abil temperatuuri kontrollimine
+                PID_error = target_temp - temperature_read; //arvutame vea sihttemp ja päris temp vahel
+                PID_p = (kp * PID_error) as f64;
+                PID_i = PID_i + (ki * PID_error);
+                PID_d = kd*(PID_error - previous_error);
                 PID_value = PID_p + PID_i + PID_d;
 
+                if(PID_value < 0.0){
+                    PID_value = 0.0;
+                }
+                if(PID_value > 1.0)
+                {    PID_value = 1.0;  }
 
                 //lisada: juhtimine
+                pdm1.set_target(PID_value as f32);
+
+                write!(&mut termopaar_buf, "; Olek: {}; ", state);
+                write!(&mut termopaar_buf, "PID value: {}\r\n", PID_value);
 
                 previous_error = PID_error;
 
                 next_time += 100000000;
             }
-            /*
-            //kontroll, kas saadud temperatuur on madalam soovitud temperatuurist. Kui on, siis läheb
-            //küttekeha tööle
-            if temperature_read < target_temp {
-                if target_temp - temperature_read > 1.0 {
-                    pdm1.set_target(1.0);
-                } else { pdm1.set_target(0.0); }
-                //kui praegune temp liiga suur, siis jahutame peltieriga
-            } else if temperature_read >= target_temp {
-                if temperature_read - target_temp > 1.0 {
-                    pdm2.set_target(1.0);
-                } else { pdm2.set_target(0.0); }
-
-            }*/
-
-
             match pdm1.poll(time) {
                 None => {}
                 Some(true) => {
+                    state=" Küttekeha soojendamine";
                     kyte1.set_high();
                 }
                 Some(false) => {
+                    state=" Küttekeha jahutamine";
                     kyte1.set_low();
                 }
             }
@@ -278,15 +265,13 @@ mod app {
                     peltier2.set_low();
                 }
             }
-            //write!(&mut feedback_buf, "termopaar väline nr1: {:?}\r\n", temp_feedback); //feedback testimiseks
-            //write!(&mut feedback_buf, "temp target: {:?}\r\n", target_temp); //feedback testimiseks
             let mut test = [0u8, 4];
             let mut buf = ArrayString::<200>::new();
-            write!(&mut buf, "PID value: {}\r\n", PID_value);
+
 
             ctx.shared.serial.lock(|serial| {
                 serial.write(&mut termopaar_buf.as_bytes());
-                serial.write(&mut buf.as_bytes());
+                //serial.write(&mut buf.as_bytes());
             });
 
             /*ctx.shared.serial.lock(|serial| {
