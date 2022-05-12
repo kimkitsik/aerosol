@@ -11,7 +11,6 @@ pub static TIME: AtomicU32 = AtomicU32::new(0);
 pub const SYS_CK_MHZ: u32 = 144;
 pub const SYST_RELOAD: u32 = (SYS_CK_MHZ * 1000) - 1;
 
-
 #[rtic::app(device = stm32f4xx_hal::pac)]
 mod app {
     use core::fmt::{Debug, Write};
@@ -73,7 +72,6 @@ mod app {
 
     pub struct PID {
         prev_error: f64,
-        //target_temp: f64, temp_read: f32,
     }
 
     #[init]
@@ -155,10 +153,9 @@ mod app {
     #[idle(shared = [serial], local = [spi, cs1, cs2, cs3, kyte1, kyte2, kyte3, peltier1, peltier2, delay])]
     fn idle(mut ctx: idle::Context) -> ! {
         let mut next_time = get_time();
-        let (cs1, cs2, cs3)=(ctx.local.cs1, ctx.local.cs2, ctx.local.cs3);
+        let (cs1, cs2, cs3, cs4)=(ctx.local.cs1, ctx.local.cs2, ctx.local.cs3, ctx.local.cs4);
         let (kyte1, kyte2, kyte3)=(ctx.local.kyte1, ctx.local.kyte2, ctx.local.kyte3);
         let (peltier1, peltier2) = (ctx.local.peltier1, ctx.local.peltier2);
-        //let cs4 = ctx.local.cs4;
         let spi = ctx.local.spi;
         let delay = ctx.local.delay;
 
@@ -170,22 +167,18 @@ mod app {
         kyte1.set_low();
 
         let (mut set_temp1, mut set_temp2, mut set_temp3) = (33.0, 20.0, 0.0);
-        let (mut prev_error1, mut prev_error2, mut prev_error3)=(0.0, 0.0, 0.0);
         let (mut state1, mut state2)=("","");
 
         //peamine loop
         loop {
             let time = get_time();
             let mut termopaar_buf = ArrayString::<200>::new();
-            let mut feedback_buf = ArrayString::<200>::new(); //testimiseks
 
             if time > next_time {
                 //temp andur 1 lugemine:
                 match read_temperature(cs1, spi, delay) {
                     Ok(r) => {
-                        //let (mut pid, mut error)=PID(set_temp1, r.temp, prev_error1);
                         let mut pid=PID(set_temp1, r.temp, 0.06, 0.1);
-                        //prev_error1=error;
                         pdm1.set_target(pid as f32);
                         write!(&mut termopaar_buf, "t1: {}", r.temp);
                         write!(&mut termopaar_buf, "; t1_state: {}; ", state1);
@@ -197,8 +190,6 @@ mod app {
                 //temp andur 2 lugemine:
                 match read_temperature(cs2, spi, delay) {
                     Ok(r) =>{
-                        //let (mut pid, mut error)=PID(set_temp1, r.temp, prev_error2);
-                        //prev_error2=error;
                         let mut pid=PID(set_temp2, r.temp, 0.06, 0.1);
                         pdm2.set_target(pid as f32);
                         write!(&mut termopaar_buf, "t2: {}", r.temp);
@@ -211,6 +202,7 @@ mod app {
                 write!(&mut termopaar_buf, "\n");
                 next_time += 100000000;
             }
+
             match pdm1.poll(time) {
                 None => {}
                 Some(true) => {
@@ -241,12 +233,12 @@ mod app {
                     Ok(count) if count > 0 => {
                         let tekst = core::str::from_utf8(&buf[..count]).unwrap();
                         let mut iter =tekst.split_whitespace();
+                        //vastuvõetud andmete põhjal määratakse küttekehade soovitud temp
                         set_temp1= iter.next().unwrap().parse().unwrap();
                         set_temp2= iter.next().unwrap().parse().unwrap();
                     }
                     _ => ()
                 };
-
             });
 
             //andmete saatmine puhvrist üle Serial pordi
