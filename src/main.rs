@@ -1,17 +1,14 @@
 #![no_std]
 #![no_main]
 
+
 mod pdm;
 
 use core::sync::atomic::{AtomicU32, Ordering};
-use arrayvec::ArrayString;
 use cortex_m;
 use cortex_m::peripheral::SYST;
-use embedded_hal::digital::v2::OutputPin;
-use max31855::Error;
 use panic_halt as _;
 use stm32f4xx_hal::rcc::Clocks;
-use stm32f4xx_hal::gpio::{Alternate, Output};
 
 pub static TIME: AtomicU32 = AtomicU32::new(0);
 pub const SYS_CK_MHZ: u32 = 144;
@@ -31,8 +28,8 @@ mod app {
     use stm32f4xx_hal::otg_fs::{USB, UsbBus};
     use stm32f4xx_hal::prelude::*;
     use stm32f4xx_hal::spi::{Mode, Phase, Polarity, Spi};
-    use systick_monotonic::fugit::Duration;
-    use systick_monotonic::Systick;
+    //use systick_monotonic::fugit::Duration;
+    //use systick_monotonic::Systick;
     use usb_device::class_prelude::UsbBusAllocator;
     use usb_device::prelude::*;
     use crate::pdm::Pdm;
@@ -179,7 +176,8 @@ mod app {
         pdm2.set_target(0.0);
         kyte1.set_low();
 
-        let (mut set_temp1, mut set_temp2, mut set_temp3) = (50.0, 20.0, 0.0); //praegu ajutiselt konstant
+        let (mut set_temp1, mut set_temp2, mut set_temp3) = (30.0, 20.0, 0.0);
+        let mut prev_error=0.0;
 
         //peamine loop
         loop {
@@ -192,10 +190,9 @@ mod app {
                 match read_temperature(cs1, spi, delay) {
                     Ok(r) => {
                         write!(&mut termopaar_buf, "t1: {}", r.temp);
-                        //temperature_read1 = r.temp as f64;
                         pdm1.set_target(PID(set_temp1, r.temp) as f32);
                         write!(&mut termopaar_buf, "; t1_state: {}; ", state1);
-                        write!(&mut termopaar_buf, "t1_pid: {}\r\n", PID(set_temp1, r.temp));
+                        write!(&mut termopaar_buf, "t1_target: {}\r\n", set_temp1);
                     }
                     Err(e) => { write!(&mut termopaar_buf, "t1: {:?}\r\n", e); }
                 };
@@ -203,11 +200,9 @@ mod app {
                 match read_temperature(cs2, spi, delay) {
                     Ok(r) => {
                         write!(&mut termopaar_buf, "t2: {}", r.temp);
-                        //temperature_read2 = r.temp as f64;
                         pdm2.set_target(PID(set_temp2, r.temp) as f32);
                         write!(&mut termopaar_buf, "; t2_state: {}; ", state2);
-                        write!(&mut termopaar_buf, "; t2_set: {}; ", set_temp2);
-                        write!(&mut termopaar_buf, "t2_pid: {}\r\n", PID(set_temp2, r.temp));
+                        write!(&mut termopaar_buf, "t2_target: {}\r\n", set_temp2);
                     }
                     Err(e) => { write!(&mut termopaar_buf, "t2: {:?}\r\n", e); }
                 };
@@ -239,24 +234,18 @@ mod app {
 
             ctx.shared.serial.lock(|serial| {
                 let mut buf = [0u8; 64];
-                match serial.read(&mut buf) {
+                let size = match serial.read(&mut buf) {
                     Ok(count) if count > 0 => {
-                        let mut write_offset = 0;
-                        while write_offset < count {
-                            match serial.write(&buf[write_offset..count]) {
-                                Ok(len) if len > 0 => {
-                                    //serial pordi kaudu saadetud andmete(temperatuuride) kättesaamine
-                                    let mut m = &buf[write_offset..count];
-                                    write!(&mut feedback_buf, " test {:?}\n",m);
-                                    serial.write(&feedback_buf.as_bytes());
-                                    write_offset += len;
-                                }
-                                _ => {}
-                            }
-                        }
+                        let tekst = core::str::from_utf8(&buf[..count]).unwrap();
+                        let mut iter =tekst.split_whitespace();
+                        set_temp1= iter.next().unwrap().parse().unwrap();
+                        set_temp2= iter.next().unwrap().parse().unwrap();
                     }
-                    _ => {}
-                }
+                    _ => ()
+                };
+
+
+
             });
 
             ctx.shared.serial.lock(|serial| {
@@ -276,8 +265,8 @@ mod app {
         cs_pin.set_high();
 
         let x = u32::from_be_bytes(data);
-        let fault = ((x & 0x10000) >> 16);
-        let noConnection = (x & 0x1);
+        let fault = (x & 0x10000) >> 16;
+        let noConnection = x & 0x1;
 
         let temp = (((x >> 16) as i16) >> 2) as f32 * 0.25;
         let inttemp = ((x as i16) >> 4) as f32 * 0.0625;
@@ -295,7 +284,7 @@ mod app {
         })
     }
 
-    fn PID(target_temp: f64, temp_read: f32) -> f64 {
+    fn PID(target_temp: f64, temp_read: f32) -> f64 {//(f64,f64) {
         //PID variables
         let mut pid_error = 0.0;
         let mut previous_error = 0.0;
@@ -312,14 +301,15 @@ mod app {
         PID_d = kd * (pid_error - previous_error);
         pid_value = PID_p + PID_i + PID_d;
 
-        if (pid_value < 0.0) {
+        if pid_value < 0.0 {
             pid_value = 0.0
         }
-        if (pid_value > 1.0)
+        if pid_value > 1.0
         { pid_value = 1.0 }
 
         previous_error = pid_error;
 
+        //(pid_value, previous_error)
         pid_value
     }
 
