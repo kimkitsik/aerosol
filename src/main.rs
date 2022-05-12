@@ -1,9 +1,6 @@
 #![no_std]
 #![no_main]
-
-
 mod pdm;
-
 use core::sync::atomic::{AtomicU32, Ordering};
 use cortex_m;
 use cortex_m::peripheral::SYST;
@@ -74,6 +71,10 @@ mod app {
         delay: stm32f4xx_hal::timer::Delay<stm32f4xx_hal::pac::TIM5, 1000000_u32>,
     }
 
+    pub struct PID {
+        prev_error: f64,
+        //target_temp: f64, temp_read: f32,
+    }
 
     #[init]
     fn init(mut ctx: init::Context) -> (Shared, Local, init::Monotonics) {
@@ -151,33 +152,26 @@ mod app {
          init::Monotonics())
     }
 
-
     #[idle(shared = [serial], local = [spi, cs1, cs2, cs3, kyte1, kyte2, kyte3, peltier1, peltier2, delay])]
     fn idle(mut ctx: idle::Context) -> ! {
         let mut next_time = get_time();
-        let cs1 = ctx.local.cs1;
-        let cs2 = ctx.local.cs2;
-        let cs3 = ctx.local.cs3;
+        let (cs1, cs2, cs3)=(ctx.local.cs1, ctx.local.cs2, ctx.local.cs3);
+        let (kyte1, kyte2, kyte3)=(ctx.local.kyte1, ctx.local.kyte2, ctx.local.kyte3);
+        let (peltier1, peltier2) = (ctx.local.peltier1, ctx.local.peltier2);
         //let cs4 = ctx.local.cs4;
         let spi = ctx.local.spi;
-        let kyte1 = ctx.local.kyte1;
-        let kyte2 = ctx.local.kyte2;
-        let kyte3 = ctx.local.kyte3;
-        let peltier1 = ctx.local.peltier1;
-        let peltier2 = ctx.local.peltier2;
         let delay = ctx.local.delay;
-        let mut state1 = "";
-        let mut state2 = "";
 
         //pdm
-        let mut pdm1 = Pdm::new(500000000, 0);
+        let mut pdm1 = Pdm::new(1000000000, 0);
         let mut pdm2 = Pdm::new(1000000000, 0);
         pdm1.set_target(0.0);
         pdm2.set_target(0.0);
         kyte1.set_low();
 
-        let (mut set_temp1, mut set_temp2, mut set_temp3) = (30.0, 20.0, 0.0);
-        let mut prev_error=0.0;
+        let (mut set_temp1, mut set_temp2, mut set_temp3) = (33.0, 20.0, 0.0);
+        let (mut prev_error1, mut prev_error2, mut prev_error3)=(0.0, 0.0, 0.0);
+        let (mut state1, mut state2)=("","");
 
         //peamine loop
         loop {
@@ -189,19 +183,27 @@ mod app {
                 //temp andur 1 lugemine:
                 match read_temperature(cs1, spi, delay) {
                     Ok(r) => {
+                        //let (mut pid, mut error)=PID(set_temp1, r.temp, prev_error1);
+                        let mut pid=PID(set_temp1, r.temp, 0.06, 0.1);
+                        //prev_error1=error;
+                        pdm1.set_target(pid as f32);
                         write!(&mut termopaar_buf, "t1: {}", r.temp);
-                        pdm1.set_target(PID(set_temp1, r.temp) as f32);
                         write!(&mut termopaar_buf, "; t1_state: {}; ", state1);
+                        write!(&mut termopaar_buf, "; t1_pid: {}; ", pid);
                         write!(&mut termopaar_buf, "t1_target: {}\r\n", set_temp1);
                     }
                     Err(e) => { write!(&mut termopaar_buf, "t1: {:?}\r\n", e); }
                 };
                 //temp andur 2 lugemine:
                 match read_temperature(cs2, spi, delay) {
-                    Ok(r) => {
+                    Ok(r) =>{
+                        //let (mut pid, mut error)=PID(set_temp1, r.temp, prev_error2);
+                        //prev_error2=error;
+                        let mut pid=PID(set_temp2, r.temp, 0.06, 0.1);
+                        pdm2.set_target(pid as f32);
                         write!(&mut termopaar_buf, "t2: {}", r.temp);
-                        pdm2.set_target(PID(set_temp2, r.temp) as f32);
                         write!(&mut termopaar_buf, "; t2_state: {}; ", state2);
+                        write!(&mut termopaar_buf, "; t2_pid: {}; ", pid);
                         write!(&mut termopaar_buf, "t2_target: {}\r\n", set_temp2);
                     }
                     Err(e) => { write!(&mut termopaar_buf, "t2: {:?}\r\n", e); }
@@ -232,9 +234,10 @@ mod app {
                 }
             }
 
+            //andmete lugemine Serial pordist
             ctx.shared.serial.lock(|serial| {
                 let mut buf = [0u8; 64];
-                let size = match serial.read(&mut buf) {
+                match serial.read(&mut buf) {
                     Ok(count) if count > 0 => {
                         let tekst = core::str::from_utf8(&buf[..count]).unwrap();
                         let mut iter =tekst.split_whitespace();
@@ -244,10 +247,9 @@ mod app {
                     _ => ()
                 };
 
-
-
             });
 
+            //andmete saatmine puhvrist üle Serial pordi
             ctx.shared.serial.lock(|serial| {
                 serial.write(&mut termopaar_buf.as_bytes());
             });
@@ -284,22 +286,24 @@ mod app {
         })
     }
 
-    fn PID(target_temp: f64, temp_read: f32) -> f64 {//(f64,f64) {
+    fn PID(target_temp: f64, temp_read: f32, kp:f64, kd:f64) -> f64{//, mut prev_error: f64) -> (f64, f64) {
         //PID variables
+        let mut pid = PID {
+            prev_error: 0.0,
+        };
+
         let mut pid_error = 0.0;
-        let mut previous_error = 0.0;
         let mut pid_value = 0.0;
 
         //PID constants
-        let (mut kp, mut ki, mut kd) = (0.06, 0.0, 0.1);
-        let (mut PID_p, mut PID_i, mut PID_d) = (0.0, 0.0, 0.0);
+        //let (mut kp, mut kd) = (0.06, 0.1);
+        let (mut pid_p, mut pid_d) = (0.0, 0.0);
 
         //PID abil temperatuuri kontrollimine
         pid_error = target_temp - temp_read as f64; //arvutame vea sihttemp ja päris temp vahel
-        PID_p = (kp * pid_error) as f64;
-        PID_i = PID_i + (ki * pid_error);
-        PID_d = kd * (pid_error - previous_error);
-        pid_value = PID_p + PID_i + PID_d;
+        pid_p = (kp * pid_error) as f64;
+        pid_d = kd * (pid_error - pid.prev_error);
+        pid_value = pid_p + pid_d;
 
         if pid_value < 0.0 {
             pid_value = 0.0
@@ -307,9 +311,9 @@ mod app {
         if pid_value > 1.0
         { pid_value = 1.0 }
 
-        previous_error = pid_error;
+        pid.prev_error=pid_error;
 
-        //(pid_value, previous_error)
+        //(pid_value, prev_error)
         pid_value
     }
 
