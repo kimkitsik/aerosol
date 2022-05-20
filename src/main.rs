@@ -70,6 +70,7 @@ mod app {
         delay: stm32f4xx_hal::timer::Delay<stm32f4xx_hal::pac::TIM5, 1000000_u32>,
         fan1: stm32f4xx_hal::gpio::Pin<'C', 8_u8, Output>,
         fan2: stm32f4xx_hal::gpio::Pin<'C', 9_u8, Output>,
+        filter: stm32f4xx_hal::gpio::Pin<'B', 1_u8, Output>,
     }
 
     #[init]
@@ -89,6 +90,7 @@ mod app {
         systick_init(&mut ctx.core.SYST, clocks);
         let gpioa = device.GPIOA.split();
         let gpioc = device.GPIOC.split();
+        let gpiob = device.GPIOB.split();
 
         let mut delay = device.TIM5.delay_us(&clocks);
         let mut cs1 = gpioa.pa4.into_push_pull_output();
@@ -105,6 +107,7 @@ mod app {
         let mut peltier2 = gpioa.pa2.into_push_pull_output();
         let mut fan1=gpioc.pc8.into_push_pull_output();
         let mut fan2=gpioc.pc9.into_push_pull_output();
+        let mut filter=gpiob.pb1.into_push_pull_output();
 
         let mode = Mode {
             polarity: Polarity::IdleLow,
@@ -146,11 +149,11 @@ mod app {
                 .build();
         }
 
-        (Shared { serial }, Local { usb_dev, spi, cs1, cs2, cs3, cs4, kyte1, kyte2, kyte3, peltier1, peltier2, fan1, fan2, delay },
+        (Shared { serial }, Local { usb_dev, spi, cs1, cs2, cs3, cs4, kyte1, kyte2, kyte3, peltier1, peltier2, fan1, fan2, filter,delay },
          init::Monotonics())
     }
 
-    #[idle(shared = [serial], local = [spi, cs1, cs2, cs3, cs4, kyte1, kyte2, kyte3, peltier1, peltier2, fan1, fan2, delay])]
+    #[idle(shared = [serial], local = [spi, cs1, cs2, cs3, cs4, kyte1, kyte2, kyte3, peltier1, peltier2, fan1, fan2, filter, delay])]
     fn idle(mut ctx: idle::Context) -> ! {
         let mut next_time = get_time();
         let (cs1, cs2, cs3, cs4)=(ctx.local.cs1, ctx.local.cs2, ctx.local.cs3, ctx.local.cs4);
@@ -159,7 +162,8 @@ mod app {
         let spi = ctx.local.spi;
         let delay = ctx.local.delay;
         let fan1=ctx.local.fan1;
-        let (mut kyte1_enable, mut kyte2_enable, mut peltier_enable)=(0, 0, 0);
+        let filter=ctx.local.filter;
+        let (mut kyte1_enable, mut kyte2_enable, mut peltier_enable, mut filter_enable)=(1, 1, 1, 0);
 
         //pdm
         let mut pdm1 = Pdm::new(1000000000, 0);
@@ -177,19 +181,19 @@ mod app {
         //esimene katse: kp=0.06; kd=0.00001
         //teine katse: kp=0.1, kd=0.001
         //kolmas: kp=0,001 kd=0,0001
-        pid1.kp = 0.096;
+        pid1.kp = 0.08;
         pid1.kd=-0.00001;
         pid1.target_temp=0.0;
 
-        pid2.kp = 0.04;
+        pid2.kp = 0.06;
         pid2.kd=0.00001;
         pid2.target_temp=0.0;
 
         pid3.kp = -2.1;
         pid3.kd= -0.0000001;
-        pid3.target_temp=19.0;
+        pid3.target_temp=24.0;
 
-        fan1.set_high();
+        fan1.set_low();
         //fan1.set_low();
 
         //peamine loop
@@ -199,6 +203,7 @@ mod app {
             let mut peltier_buf = ArrayString::<200>::new();
 
             if time > next_time {
+                write!(&mut buffer, "time: {}; ", time / 1000000000);
                 //temp andur 1 lugemine:
                 if kyte1_enable==1 {
                     match read_temperature(cs1, spi, delay) {
@@ -210,8 +215,8 @@ mod app {
                             //write!(&mut termopaar_buf, "t1_pid_d: {}, ", pid1.pid_d);
                             //write!(&mut termopaar_buf, "t1_state: {}, ", state1);
                             write!(&mut buffer, "t1_pid: {:.3}, ", output);
-                            write!(&mut buffer, "t1_target: {}, ", pid1.target_temp);
-                            write!(&mut buffer, "t1_time: {};\r\n", time / 1000000000);
+                            write!(&mut buffer, "t1_target: {};", pid1.target_temp);
+
                         }
                         Err(e) => { write!(&mut buffer, "t1: {:?}\r\n", e); }
                     };
@@ -228,7 +233,7 @@ mod app {
                             //write!(&mut termopaar_buf, ", t2_state: {}, ", state2);
                             write!(&mut buffer, "t2_pid: {:.3}, ", output);
                             //write!(&mut termopaar_buf, "t2_time: {}, ", time/1000000000);
-                            write!(&mut buffer, "t2_target: {};\r\n ", pid2.target_temp);
+                            write!(&mut buffer, "t2_target: {};", pid2.target_temp);
                         }
                         Err(e) => { write!(&mut buffer, "t2: {:?}\r\n", e); }
                     };
@@ -239,12 +244,20 @@ mod app {
                             let mut output = pid3.set_input(r.temp);
                             pdm3.set_target(output);
                             fan1.set_low();
-                            write!(&mut buffer, "peltier1: {}, ", r.temp);
-                            write!(&mut buffer, ",p_state: {}, ", state3);
-                            write!(&mut buffer, "peltier1_pid: {};\r\n", output);
+                            write!(&mut buffer, "p1: {}, ", r.temp);
+                            //write!(&mut buffer, ",p_state: {}, ", state3);
+                            //write!(&mut buffer, "p_pid: {:.3};\r\n", output);
                         }
                         Err(e) => { write!(&mut buffer, "peltier1: {:?}\r\n", e); }
                     };
+                }
+
+                if filter_enable==1{
+                    filter.set_low();
+                    write!(&mut buffer, "filter: on; \r\n");
+                }else {
+                    filter.set_high();
+                    //write!(&mut buffer, "filter: off; \r\n");
                 }
 
 
@@ -253,7 +266,7 @@ mod app {
                     serial.write(b"\r\n");
                     serial.write(b"\n");
                 });*/
-                next_time += 1000000000;
+                next_time += 100000000;
 
 
 
@@ -302,7 +315,13 @@ mod app {
                         let tekst = core::str::from_utf8(&buf[..count]).unwrap();
                         let mut iter =tekst.split_whitespace();
                         //vastuvõetud andmete põhjal määratakse küttekehade soovitud temp
-                        let mut x:i32;
+
+                        pid1.target_temp=iter.next().unwrap().parse().unwrap();
+                        pid2.target_temp=iter.next().unwrap().parse().unwrap();
+                        //pid3.target_temp=iter.next().unwrap().parse().unwrap();
+
+
+                       /* let mut x:i32;
                         x=iter.next().unwrap().parse().unwrap();
                         if x==1 {
                             let mut temp:f32;
@@ -332,7 +351,7 @@ mod app {
                                 peltier_enable=1;
                                 pid3.target_temp= temp;
                             }
-                        }
+                        }*/
                     }
                     _ => ()
                 };
